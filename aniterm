@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
 
-# AniTerm - CLI para ver anime con subtítulos en español
-# Inspirado en ani-cli pero enfocado en contenido en español
+# AniTerm - CLI to watch anime with Spanish subtitles
 
 set -e
 
 VERSION="1.0.0"
 SCRIPT_NAME="aniterm"
-
-# Directorio temporal
 TEMP_DIR="${TMPDIR:-/tmp}/aniterm"
 
-# Limpiar archivos temporales al salir (seguridad)
+# clean on exit
 cleanup() {
     if [[ -d "$TEMP_DIR" ]]; then
         rm -rf "$TEMP_DIR" 2>/dev/null || true
@@ -19,23 +16,23 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Colores para la terminal
+# terminal colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
-NC='\033[0m' # Sin color
+NC='\033[0m'
 
-# Configuración por defecto
+# default config
 PLAYER="${ANITERM_PLAYER:-mpv}"
 DOWNLOAD_DIR="${ANITERM_DOWNLOAD_DIR:-$HOME/Downloads/AniTerm}"
 QUALITY="${ANITERM_QUALITY:-1080}"
 HISTORY_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/aniterm/historial"
 LOG_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/aniterm/log"
 
-# Variables de estado
+# state variables
 query=""
 episode=""
 download_mode=0
@@ -44,14 +41,10 @@ syncplay_mode=0
 no_detach=0
 select_nth=""
 prebuffer_mode=0
-source="monoschino"  # Fuente por defecto: monoschino (más rápido) o animeflv
+source="monoschino" # default
 
-# User Agent
+# user Agent
 AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-
-# ========================
-# FUNCIONES DE UTILIDAD
-# ========================
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"
@@ -62,7 +55,7 @@ info() {
 }
 
 success() {
-    printf "${GREEN}[✓]${NC} %s\n" "$*"
+    printf "${GREEN}[DONE]${NC} %s\n" "$*"
 }
 
 warn() {
@@ -78,7 +71,6 @@ die() {
     exit 1
 }
 
-# Verificar dependencias
 check_dependencies() {
     local missing=()
     
@@ -86,21 +78,21 @@ check_dependencies() {
         command -v "$dep" >/dev/null 2>&1 || missing+=("$dep")
     done
     
-    # Verificar reproductor
+    # verify player
     if ! command -v "$PLAYER" >/dev/null 2>&1; then
-        missing+=("$PLAYER (reproductor)")
+        missing+=("$PLAYER (player)")
     fi
     
     if [[ ${#missing[@]} -gt 0 ]]; then
-        error "Faltan las siguientes dependencias:"
+        error "Missing dependencies:"
         for dep in "${missing[@]}"; do
             echo "  - $dep"
         done
-        die "Por favor, instala las dependencias faltantes."
+        die "Please install missing dependencies."
     fi
 }
 
-# Crear directorios necesarios
+# create directories
 setup_dirs() {
     local data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/aniterm"
     mkdir -p "$data_dir"
@@ -108,28 +100,20 @@ setup_dirs() {
     touch "$LOG_FILE" 2>/dev/null || true
 }
 
-# ========================
-# FUENTES DE ANIME
-# ========================
 
-# MonoSchino2 - Fuente principal (más rápida)
+# MonoSchino2
 search_monoschino() {
     local search_query="$1"
     local encoded_query
     encoded_query=$(printf '%s' "$search_query" | sed 's/ /-/g' | tr '[:upper:]' '[:lower:]')
     
-    # MonoSchino2 usa URLs directas como /nombre-anime
-    # Probamos buscar en el directorio
     local page_content
     page_content=$(curl -s "https://monoschino2.com/directorio/anime?q=${search_query// /+}" \
         -H "User-Agent: $AGENT" \
         -H "Accept-Language: es-ES,es;q=0.9")
     
-    # Como el directorio carga vía JavaScript, intentamos URLs comunes
-    # Probamos el nombre directo y variantes
     local slug="${encoded_query}"
     
-    # Verificar si la página del anime existe
     local test_url="https://monoschino2.com/${slug}"
     local test_response
     test_response=$(curl -sI "$test_url" -H "User-Agent: $AGENT" --max-time 5 2>/dev/null | head -1)
@@ -143,11 +127,9 @@ search_monoschino() {
         fi
     fi
     
-    # También buscar en la página principal los últimos episodios
     local home_page
     home_page=$(curl -s "https://monoschino2.com/" -H "User-Agent: $AGENT" --max-time 10)
     
-    # Extraer animes de la página principal que coincidan
     echo "$home_page" | grep -oE 'href="/ver/[^"]*"' | sed 's/href="\/ver\///; s/"$//' | \
         sed 's/-[0-9]*$//' | sort -u | \
         while read -r anime_slug; do
@@ -159,7 +141,7 @@ search_monoschino() {
         done
 }
 
-# Obtener lista de episodios de MonoSchino2
+# get episodes from MonoSchino2
 get_episodes_monoschino() {
     local anime_url="$1"
     local anime_slug
@@ -168,7 +150,6 @@ get_episodes_monoschino() {
     local page_content
     page_content=$(curl -s "$anime_url" -H "User-Agent: $AGENT" --max-time 15)
     
-    # Extraer episodios del HTML
     echo "$page_content" | grep -oE "href=\"/ver/${anime_slug}-[0-9]+\"" | \
         sed "s|href=\"/ver/${anime_slug}-||; s|\"||g" | sort -n -u | \
         while read -r ep_num; do
@@ -178,97 +159,79 @@ get_episodes_monoschino() {
         done
 }
 
-# Obtener TODAS las URLs de video disponibles de MonoSchino2 (para fallback)
+# get all video URLs from MonoSchino2 for fallback
 get_all_video_urls_monoschino() {
     local episode_url="$1"
     
     local page_content
     page_content=$(curl -s "$episode_url" -H "User-Agent: $AGENT" --max-time 15)
     
-    # Extraer todas las URLs de servidores conocidos
-    # Formato: servidor|url
-    
-    # MP4Upload (prioridad 1 - más rápido)
     echo "$page_content" | grep -oE "mp4upload\.com/embed-[a-zA-Z0-9]+\.html" | head -1 | while read -r url; do
         [[ -n "$url" ]] && echo "mp4upload|https://www.${url}"
     done
     
-    # VOE (prioridad 2)
     echo "$page_content" | grep -oE "voe\.sx/e/[a-zA-Z0-9]+" | head -1 | while read -r url; do
         [[ -n "$url" ]] && echo "voe|https://${url}"
     done
     
-    # UQLoad (prioridad 3)
     echo "$page_content" | grep -oE "uqload\.[a-z]+/embed-[a-zA-Z0-9]+\.html" | head -1 | while read -r url; do
         [[ -n "$url" ]] && echo "uqload|https://${url}"
     done
     
-    # Streamtape (prioridad 4)
     echo "$page_content" | grep -oE "streamtape\.com/e/[a-zA-Z0-9]+/[^'\"]*" | sed "s/'.*//; s/\".*//;" | head -1 | while read -r url; do
         [[ -n "$url" ]] && echo "streamtape|https://${url}"
     done
     
-    # StreamHLS (prioridad 5)
     echo "$page_content" | grep -oE "streamhls\.to/e/[a-zA-Z0-9]+" | head -1 | while read -r url; do
         [[ -n "$url" ]] && echo "streamhls|https://${url}"
     done
 }
 
-# Obtener enlace de video de MonoSchino2
+# get video URL from MonoSchino2
 get_video_url_monoschino() {
     local episode_url="$1"
     
     local page_content
     page_content=$(curl -s "$episode_url" -H "User-Agent: $AGENT" --max-time 15)
     
-    # MonoSchino2 tiene tabsArray con múltiples servidores
-    # Extraer TODAS las URLs de servidores conocidos y devolverlas separadas por newline
-    # El orden de preferencia se maneja en play_video
-    
     local urls=""
     
-    # MP4Upload (MÁS RÁPIDO ~3-5 MB/s)
     local mp4upload_url
     mp4upload_url=$(echo "$page_content" | grep -oE "mp4upload\.com/embed-[a-zA-Z0-9]+\.html" | head -1)
     if [[ -n "$mp4upload_url" ]]; then
         urls+="mp4upload|https://www.${mp4upload_url}"$'\n'
     fi
     
-    # VOE
     local voe_url
     voe_url=$(echo "$page_content" | grep -oE "voe\.sx/e/[a-zA-Z0-9]+" | head -1)
     if [[ -n "$voe_url" ]]; then
         urls+="voe|https://${voe_url}"$'\n'
     fi
     
-    # Streamtape
     local streamtape_url
     streamtape_url=$(echo "$page_content" | grep -oE "streamtape\.com/e/[a-zA-Z0-9]+/[^'\"]*" | head -1)
     if [[ -n "$streamtape_url" ]]; then
         urls+="streamtape|https://${streamtape_url}"$'\n'
     fi
     
-    # UQLoad
     local uqload_url
     uqload_url=$(echo "$page_content" | grep -oE "uqload\.[a-z]+/embed-[a-zA-Z0-9]+\.html" | head -1)
     if [[ -n "$uqload_url" ]]; then
         urls+="uqload|https://${uqload_url}"$'\n'
     fi
     
-    # StreamHLS
     local streamhls_url
     streamhls_url=$(echo "$page_content" | grep -oE "streamhls\.to/e/[a-zA-Z0-9]+" | head -1)
     if [[ -n "$streamhls_url" ]]; then
         urls+="streamhls|https://${streamhls_url}"$'\n'
     fi
     
-    # Devolver la primera URL encontrada (compatibilidad) o todas si está vacío
     if [[ -n "$urls" ]]; then
         echo "$urls" | head -1 | cut -d'|' -f2
     fi
 }
 
-# AnimeFLV - Fuente alternativa
+# AnimeFLV - alternative source
 search_animeflv() {
     local search_query="$1"
     local encoded_query
@@ -285,17 +248,15 @@ search_animeflv() {
         done
 }
 
-# Obtener lista de episodios de AnimeFLV
+# get episodes from AnimeFLV
 get_episodes_animeflv() {
     local anime_url="$1"
     local anime_slug
     anime_slug=$(echo "$anime_url" | sed 's|.*/anime/||')
     
-    # AnimeFLV carga los episodios via JavaScript, extraemos el array de episodios
     local page_content
     page_content=$(curl -s "$anime_url" -H "User-Agent: $AGENT")
     
-    # Extraer el array de episodios: var episodes = [[num,id],[num,id],...]
     local episodes_data
     episodes_data=$(echo "$page_content" | grep "var episodes" | sed -n 's/.*var episodes = \[\(.*\)\];/\1/p')
     
@@ -303,7 +264,6 @@ get_episodes_animeflv() {
         return
     fi
     
-    # Parsear el array y generar lista de episodios
     echo "$episodes_data" | tr '[],' '\n' | sed '/^$/d' | \
         paste - - | \
         while read -r ep_num ep_id; do
@@ -313,7 +273,7 @@ get_episodes_animeflv() {
         done | sort -t' ' -k2 -n
 }
 
-# Obtener TODOS los enlaces de video de AnimeFLV para fallback
+# get all video URLs from AnimeFLV for fallback
 get_all_video_urls_animeflv() {
     local episode_url="$1"
     local urls=""
@@ -321,59 +281,48 @@ get_all_video_urls_animeflv() {
     local page_content
     page_content=$(curl -s "$episode_url" -H "User-Agent: $AGENT")
     
-    # AnimeFLV tiene un objeto videos = {"SUB":[{...}]} con múltiples servidores
-    # Extraer todos los servidores disponibles
-    
-    # Mega (más confiable para animes viejos)
     local mega_url
     mega_url=$(echo "$page_content" | grep -oE '"server":"mega"[^}]*"code":"[^"]*"' | sed -n 's/.*"code":"\([^"]*\)".*/\1/p' | sed 's/\\//g' | head -1)
     if [[ -n "$mega_url" ]]; then
         urls+="mega|${mega_url}"$'\n'
     fi
     
-    # Mail.ru (Maru)
     local maru_url
     maru_url=$(echo "$page_content" | grep -oE '"server":"maru"[^}]*"code":"[^"]*"' | sed -n 's/.*"code":"\([^"]*\)".*/\1/p' | sed 's/\\//g' | sed 's/#.*$//' | head -1)
     if [[ -n "$maru_url" ]]; then
         urls+="mailru|${maru_url}"$'\n'
     fi
     
-    # Ok.ru
     local okru_url
     okru_url=$(echo "$page_content" | grep -oE '"server":"okru"[^}]*"code":"[^"]*"' | sed -n 's/.*"code":"\([^"]*\)".*/\1/p' | sed 's/\\//g' | head -1)
     if [[ -n "$okru_url" ]]; then
         urls+="okru|${okru_url}"$'\n'
     fi
     
-    # YourUpload
     local yu_url
     yu_url=$(echo "$page_content" | grep -oE '"server":"yu"[^}]*"code":"[^"]*"' | sed -n 's/.*"code":"\([^"]*\)".*/\1/p' | sed 's/\\//g' | head -1)
     if [[ -n "$yu_url" ]]; then
         urls+="yourupload|${yu_url}"$'\n'
     fi
     
-    # Streamtape
     local stape_url
     stape_url=$(echo "$page_content" | grep -oE '"server":"stape"[^}]*"code":"[^"]*"' | sed -n 's/.*"code":"\([^"]*\)".*/\1/p' | sed 's/\\//g' | head -1)
     if [[ -n "$stape_url" ]]; then
         urls+="streamtape|${stape_url}"$'\n'
     fi
     
-    # Streamwish
     local sw_url
     sw_url=$(echo "$page_content" | grep -oE '"server":"sw"[^}]*"code":"[^"]*"' | sed -n 's/.*"code":"\([^"]*\)".*/\1/p' | sed 's/\\//g' | head -1)
     if [[ -n "$sw_url" ]]; then
         urls+="streamwish|${sw_url}"$'\n'
     fi
     
-    # SendVid
     local sendvid_url
     sendvid_url=$(echo "$page_content" | grep -oE '"server":"sendvid"[^}]*"code":"[^"]*"' | sed -n 's/.*"code":"\([^"]*\)".*/\1/p' | sed 's/\\//g' | head -1)
     if [[ -n "$sendvid_url" ]]; then
         urls+="sendvid|${sendvid_url}"$'\n'
     fi
     
-    # Netu/Fembed
     local netu_url
     netu_url=$(echo "$page_content" | grep -oE '"server":"netu"[^}]*"code":"[^"]*"' | sed -n 's/.*"code":"\([^"]*\)".*/\1/p' | sed 's/\\//g' | head -1)
     if [[ -n "$netu_url" ]]; then
@@ -383,7 +332,7 @@ get_all_video_urls_animeflv() {
     echo "$urls"
 }
 
-# Obtener enlace de video de AnimeFLV (compatibilidad)
+# get video URL from AnimeFLV
 get_video_url_animeflv() {
     local episode_url="$1"
     local all_urls
@@ -393,11 +342,9 @@ get_video_url_animeflv() {
     echo "$all_urls" | head -1 | cut -d'|' -f2
 }
 
-# ========================
-# INTERFAZ DE USUARIO
-# ========================
+# USER INTERFACE
 
-# Seleccionar con fzf
+# fzf selection
 select_option() {
     local prompt="$1"
     
@@ -405,37 +352,35 @@ select_option() {
         --height=~50% \
         --layout=reverse \
         --border \
-        --header="🎬 AniTerm - Anime en Español" \
+        --header="🎬 AniTerm - Anime in Spanish" \
         --color="header:italic:underline"
 }
 
-# Menú de selección de anime
+# anime selection menu
 select_anime() {
     local results="$1"
     
     if [[ -z "$results" ]]; then
-        die "No se encontraron resultados para '$query'"
+        die "No results found for '$query'"
     fi
     
-    echo "$results" | cut -d'|' -f1 | select_option "Selecciona anime:"
+    echo "$results" | cut -d'|' -f1 | select_option "Select anime:"
 }
 
-# Menú de selección de episodio
+# episode selection menu
 select_episode() {
     local episodes="$1"
     
     if [[ -z "$episodes" ]]; then
-        die "No se encontraron episodios"
+        die "No episodes found"
     fi
     
-    echo "$episodes" | cut -d'|' -f1 | select_option "Selecciona episodio:"
+    echo "$episodes" | cut -d'|' -f1 | select_option "Select episode:"
 }
 
-# ========================
-# REPRODUCCIÓN
-# ========================
+# PLAYBACK
 
-# Prebuffer: descarga completo a temp y luego reproduce
+# prebuffer mode: download to temp then play
 prebuffer_and_play() {
     local url="$1"
     local title="$2"
@@ -444,12 +389,11 @@ prebuffer_and_play() {
     
     mkdir -p "$TEMP_DIR"
     
-    info "Prebuffering: descargando episodio completo..."
-    info "Ubicación temporal: $TEMP_DIR"
-    info "Esto puede tomar unos minutos dependiendo de tu conexión"
+    info "Prebuffering: downloading full episode..."
+    info "Temp location: $TEMP_DIR"
+    info "This may take a few minutes depending on your connection"
     echo ""
     
-    # Descargar con progreso visible - preferir aria2c o curl con referer
     if command -v aria2c >/dev/null 2>&1; then
         local aria_args=(-x 16 -s 16 -o "$temp_file" --dir="$(dirname "$temp_file")" --allow-overwrite=true)
         [[ -n "$referer" ]] && aria_args+=(--header="Referer: $referer")
@@ -461,20 +405,19 @@ prebuffer_and_play() {
     elif command -v yt-dlp >/dev/null 2>&1; then
         yt-dlp --progress --newline --no-check-certificates -o "$temp_file" "$url"
     else
-        die "Se necesita aria2c, curl o yt-dlp para prebuffer"
+        die "aria2c, curl or yt-dlp required for prebuffer"
     fi
     echo ""
     
     if [[ ! -f "$temp_file" ]]; then
-        die "Error al descargar el episodio"
+        die "Failed to download episode"
     fi
     
     local file_size
     file_size=$(du -h "$temp_file" | cut -f1)
-    success "Descarga completa ($file_size)"
-    info "Iniciando reproducción..."
+    success "Download complete ($file_size)"
+    info "Starting playback..."
     
-    # Reproducir desde archivo local (sin buffering issues)
     case "$PLAYER" in
         mpv)
             mpv --force-media-title="$title" "$temp_file"
@@ -490,9 +433,9 @@ prebuffer_and_play() {
             ;;
     esac
     
-    # Limpiar archivo temporal después de reproducir
+    # cleanup temp file after playback
     rm -f "$temp_file"
-    info "Archivo temporal eliminado"
+    info "Temp file deleted"
 }
 
 play_video() {
@@ -500,21 +443,20 @@ play_video() {
     local title="$2"
     
     if [[ -z "$video_url" ]]; then
-        die "No se pudo obtener el enlace del video"
+        die "Could not get video link"
     fi
     
-    info "Reproduciendo: $title"
+    info "Playing: $title"
     log "Reproduciendo: $title - URL: $video_url"
     
     # Guardar en historial
     echo "$(date '+%Y-%m-%d %H:%M')|$title|$video_url" >> "$HISTORY_FILE"
     
-    # Función auxiliar para extraer URL directa
+    # extract direct URL helper
     extract_direct_url() {
         local url="$1"
         local extracted=""
         
-        # Intentar con yt-dlp primero
         if command -v yt-dlp >/dev/null 2>&1; then
             extracted=$(yt-dlp -g --no-check-certificates "$url" 2>/dev/null | head -1)
             if [[ -n "$extracted" && "$extracted" != "$url" ]]; then
@@ -526,12 +468,11 @@ play_video() {
         return 1
     }
     
-    # Si es un enlace embed, intentar extraer el enlace directo
     local direct_url="$video_url"
     local extraction_success=0
     
     if [[ "$video_url" == *"embed"* || "$video_url" == *"mail.ru"* || "$video_url" == *"ok.ru"* || "$video_url" == *"mp4upload"* || "$video_url" == *"voe.sx"* || "$video_url" == *"streamtape"* || "$video_url" == *"uqload"* ]]; then
-        info "Extrayendo enlace directo..."
+        info "Extracting direct link..."
         
         local extracted_url
         extracted_url=$(extract_direct_url "$video_url")
@@ -540,11 +481,10 @@ play_video() {
             direct_url="$extracted_url"
             extraction_success=1
         else
-            warn "No se pudo extraer enlace directo, intentando reproducir URL embed..."
+            warn "Could not extract direct link, trying embed URL..."
         fi
     fi
     
-    # Determinar referer según el servidor de origen
     local referer=""
     if [[ "$video_url" == *"mp4upload"* ]]; then
         referer="https://www.mp4upload.com/"
@@ -558,7 +498,6 @@ play_video() {
         referer="https://my.mail.ru/"
     fi
     
-    # Modo prebuffer: descarga a archivo temporal primero
     if [[ $prebuffer_mode -eq 1 ]]; then
         prebuffer_and_play "$direct_url" "$title" "$referer"
         return
@@ -607,16 +546,13 @@ play_video() {
     esac
     
     if [[ $download_mode -eq 1 ]]; then
-        # Extraer nombre del anime y episodio del título
         local anime_name episode_name
         anime_name=$(echo "$title" | sed 's/ - Episodio.*$//')
         episode_name=$(echo "$title" | grep -oE 'Episodio [0-9]+' || echo "$title")
         download_video "$direct_url" "$anime_name" "$episode_name" "$referer"
     else
-        # Si ya extrajimos una URL directa de video, usar --no-ytdl para evitar re-extracción
         if [[ "$direct_url" != "$video_url" && "$PLAYER" == "mpv" ]]; then
             player_args+=(--no-ytdl)
-            # Agregar Referer según el servidor de origen
             if [[ -n "$referer" ]]; then
                 player_args+=(--http-header-fields="Referer: $referer")
             fi
@@ -631,28 +567,25 @@ download_video() {
     local episode_name="$3"
     local referer="$4"
     
-    # Limpiar nombre del anime para usar como carpeta
     local anime_folder
     anime_folder=$(echo "$anime_name" | sed 's/[^a-zA-Z0-9 ]//g' | sed 's/  */ /g' | sed 's/^ *//;s/ *$//')
     
-    # Extraer número de episodio y formatear
     local ep_num
     ep_num=$(echo "$episode_name" | grep -oE '[0-9]+' | head -1)
     local filename
     if [[ -n "$ep_num" ]]; then
-        filename=$(printf "Episodio %02d.mp4" "$ep_num")
+        filename=$(printf "Episode %02d.mp4" "$ep_num")
     else
         filename=$(echo "$episode_name" | sed 's/[^a-zA-Z0-9]/_/g').mp4
     fi
     
-    # Crear directorio del anime
     local anime_dir="${DOWNLOAD_DIR}/${anime_folder}"
     mkdir -p "$anime_dir"
     
     local full_path="${anime_dir}/${filename}"
     
-    info "Descargando: $anime_name - $episode_name"
-    info "Destino: $full_path"
+    info "Downloading: $anime_name - $episode_name"
+    info "Destination: $full_path"
     echo ""
     
     if command -v aria2c >/dev/null 2>&1; then
@@ -666,29 +599,27 @@ download_video() {
     elif command -v yt-dlp >/dev/null 2>&1; then
         yt-dlp --no-check-certificates -o "$full_path" "$url"
     else
-        die "Se necesita aria2c, curl o yt-dlp para descargar"
+        die "aria2c, curl or yt-dlp required for download"
     fi
     
     if [[ -f "$full_path" ]]; then
         local file_size
         file_size=$(du -h "$full_path" | cut -f1)
-        success "Descarga completada: $full_path ($file_size)"
+        success "Download complete: $full_path ($file_size)"
     else
-        error "Error al descargar el episodio"
+        error "Failed to download episode"
     fi
 }
 
-# ========================
-# HISTORIAL
-# ========================
+# HISTORY
 
 show_history() {
     if [[ ! -s "$HISTORY_FILE" ]]; then
-        info "El historial está vacío"
+        info "History is empty"
         return
     fi
     
-    echo -e "${CYAN}=== Historial de Visualización ===${NC}"
+    echo -e "${CYAN}=== Watch History ===${NC}"
     tail -20 "$HISTORY_FILE" | while IFS='|' read -r date title url; do
         echo -e "${YELLOW}$date${NC} - $title"
     done
@@ -696,7 +627,7 @@ show_history() {
 
 continue_watching() {
     if [[ ! -s "$HISTORY_FILE" ]]; then
-        die "No hay historial disponible"
+        die "No history available"
     fi
     
     local last_entry
@@ -706,7 +637,7 @@ continue_watching() {
     title=$(echo "$last_entry" | cut -d'|' -f2)
     url=$(echo "$last_entry" | cut -d'|' -f3)
     
-    info "Continuando: $title"
+    info "Continuing: $title"
     play_video "$url" "$title"
 }
 
@@ -714,141 +645,134 @@ delete_history() {
     if [[ -f "$HISTORY_FILE" ]]; then
         rm "$HISTORY_FILE"
         touch "$HISTORY_FILE"
-        success "Historial eliminado"
+        success "History deleted"
     fi
 }
 
-# ========================
-# LOGS
-# ========================
+# LOGGING
 
 show_logs() {
     if [[ -f "$LOG_FILE" ]]; then
         less "$LOG_FILE"
     else
-        info "No hay logs disponibles"
+        info "No logs available"
     fi
 }
 
-# ========================
-# AYUDA
-# ========================
+# HELP
 
 show_help() {
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║${NC}                    ${CYAN}AniTerm${NC} v${VERSION}                            ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}           CLI para ver anime con subs en español             ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}           CLI to watch anime with Spanish subs              ${CYAN}║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "${GREEN}Uso:${NC}"
-    echo "    ${SCRIPT_NAME} [opciones] [búsqueda]"
-    echo "    ${SCRIPT_NAME} [búsqueda] [opciones]"
+    echo -e "${GREEN}Usage:${NC}"
+    echo "    ${SCRIPT_NAME} [options] [search]"
+    echo "    ${SCRIPT_NAME} [search] [options]"
     echo ""
-    echo -e "${GREEN}Opciones:${NC}"
-    echo -e "    ${YELLOW}-c, --continuar${NC}"
-    echo "        Continuar viendo desde el historial"
+    echo -e "${GREEN}Options:${NC}"
+    echo -e "    ${YELLOW}-c, --continue${NC}"
+    echo "        Continue watching from history"
     echo ""
-    echo -e "    ${YELLOW}-d, --descargar${NC}"
-    echo "        Descargar el video en lugar de reproducirlo"
+    echo -e "    ${YELLOW}-d, --download${NC}"
+    echo "        Download video instead of playing"
     echo ""
-    echo -e "    ${YELLOW}-D, --borrar-historial${NC}"
-    echo "        Eliminar el historial de visualización"
+    echo -e "    ${YELLOW}-D, --delete${NC}"
+    echo "        Delete watch history"
     echo ""
     echo -e "    ${YELLOW}-l, --logs${NC}"
-    echo "        Mostrar los logs del programa"
+    echo "        Show program logs"
     echo ""
-    echo -e "    ${YELLOW}-H, --historial${NC}"
-    echo "        Mostrar el historial de visualización"
+    echo -e "    ${YELLOW}-H, --history${NC}"
+    echo "        Show watch history"
     echo ""
     echo -e "    ${YELLOW}-s, --syncplay${NC}"
-    echo "        Usar Syncplay para ver con amigos"
+    echo "        Use Syncplay to watch with friends"
     echo ""
-    echo -e "    ${YELLOW}-S, --seleccionar <n>${NC}"
-    echo "        Seleccionar la entrada número n directamente"
+    echo -e "    ${YELLOW}-S, --select <n>${NC}"
+    echo "        Select entry number n directly"
     echo ""
-    echo -e "    ${YELLOW}-q, --calidad <res>${NC}"
-    echo "        Especificar la calidad del video (720, 1080, etc.)"
+    echo -e "    ${YELLOW}-q, --quality <res>${NC}"
+    echo "        Set video quality (720, 1080, etc.)"
     echo ""
     echo -e "    ${YELLOW}-v, --vlc${NC}"
-    echo "        Usar VLC como reproductor"
+    echo "        Use VLC as player"
     echo ""
     echo -e "    ${YELLOW}-V, --version${NC}"
-    echo "        Mostrar la versión del script"
+    echo "        Show version"
     echo ""
-    echo -e "    ${YELLOW}-h, --ayuda${NC}"
-    echo "        Mostrar este mensaje de ayuda"
+    echo -e "    ${YELLOW}-h, --help${NC}"
+    echo "        Show this help message"
     echo ""
-    echo -e "    ${YELLOW}-e, --episodio <n|n-m>${NC}"
-    echo "        Especificar episodio o rango de episodios"
+    echo -e "    ${YELLOW}-e, --episode <n|n-m|n->${NC}"
+    echo "        Specify episode or range (e.g., 1, 1-5, 4-)"
     echo ""
     echo -e "    ${YELLOW}-p, --prebuffer${NC}"
-    echo "        Descargar episodio completo antes de reproducir (sin lag)"
+    echo "        Download full episode before playing (no lag)"
     echo ""
     echo -e "    ${YELLOW}--no-detach${NC}"
-    echo "        No separar el reproductor (útil para reproducción en terminal)"
+    echo "        Don't detach player (useful for terminal playback)"
     echo ""
     echo -e "    ${YELLOW}--monoschino${NC}"
-    echo "        Usar MonoSchino2 como fuente (por defecto, más rápido ~3 MB/s)"
+    echo "        Use MonoSchino2 as source (default, faster ~3 MB/s)"
     echo ""
     echo -e "    ${YELLOW}--animeflv${NC}"
-    echo "        Usar AnimeFLV como fuente (alternativa, más lento ~80 KB/s)"
+    echo "        Use AnimeFLV as source (alternative, slower ~80 KB/s)"
     echo ""
-    echo -e "    ${YELLOW}--source <fuente>${NC}"
-    echo "        Especificar fuente: monoschino o animeflv"
+    echo -e "    ${YELLOW}--source <source>${NC}"
+    echo "        Specify source: monoschino or animeflv"
     echo ""
-    echo -e "${GREEN}Ejemplos:${NC}"
+    echo -e "${GREEN}Examples:${NC}"
     echo -e "    ${CYAN}${SCRIPT_NAME} naruto${NC}"
-    echo "        Buscar \"naruto\" y seleccionar episodio"
+    echo "        Search for \"naruto\" and select episode"
     echo ""
     echo -e "    ${CYAN}${SCRIPT_NAME} ao-no-hako${NC}"
-    echo "        Buscar \"ao no hako\" (Blue Box)"
+    echo "        Search for \"ao no hako\" (Blue Box)"
     echo ""
     echo -e "    ${CYAN}${SCRIPT_NAME} -q 720 one piece${NC}"
-    echo "        Buscar \"one piece\" en calidad 720p"
+    echo "        Search \"one piece\" in 720p quality"
     echo ""
     echo -e "    ${CYAN}${SCRIPT_NAME} -d -e 1-5 demon slayer${NC}"
-    echo "        Descargar episodios 1 al 5 de \"demon slayer\""
+    echo "        Download episodes 1 to 5 of \"demon slayer\""
     echo ""
     echo -e "    ${CYAN}${SCRIPT_NAME} --animeflv attack on titan${NC}"
-    echo "        Ver \"attack on titan\" usando AnimeFLV como fuente"
+    echo "        Watch \"attack on titan\" using AnimeFLV"
     echo ""
     echo -e "    ${CYAN}${SCRIPT_NAME} -c${NC}"
-    echo "        Continuar viendo el último anime"
+    echo "        Continue watching last anime"
     echo ""
-    echo -e "${GREEN}Fuentes disponibles:${NC}"
-    echo -e "    ${YELLOW}monoschino${NC} (por defecto) - MonoSchino2.com - Servidores rápidos (~3 MB/s)"
-    echo -e "    ${YELLOW}animeflv${NC}                 - AnimeFLV.net - Alternativa (~80 KB/s)"
+    echo -e "${GREEN}Available sources:${NC}"
+    echo -e "    ${YELLOW}monoschino${NC} (default) - MonoSchino2.com - Fast servers (~3 MB/s)"
+    echo -e "    ${YELLOW}animeflv${NC}             - AnimeFLV.net - Alternative (~80 KB/s)"
     echo ""
-    echo -e "${GREEN}Variables de entorno:${NC}"
-    echo -e "    ${YELLOW}ANITERM_PLAYER${NC}       - Reproductor por defecto (mpv, vlc, iina)"
-    echo -e "    ${YELLOW}ANITERM_DOWNLOAD_DIR${NC} - Directorio de descargas"
-    echo -e "    ${YELLOW}ANITERM_QUALITY${NC}      - Calidad por defecto"
+    echo -e "${GREEN}Environment variables:${NC}"
+    echo -e "    ${YELLOW}ANITERM_PLAYER${NC}       - Default player (mpv, vlc, iina)"
+    echo -e "    ${YELLOW}ANITERM_DOWNLOAD_DIR${NC} - Download directory"
+    echo -e "    ${YELLOW}ANITERM_QUALITY${NC}      - Default quality"
     echo ""
-    echo -e "${GREEN}Dependencias:${NC}"
-    echo "    Requeridas: curl, grep, sed, fzf, mpv/vlc/iina"
-    echo "    Opcionales: aria2c (descargas), yt-dlp (extracción de video)"
+    echo -e "${GREEN}Dependencies:${NC}"
+    echo "    Required: curl, grep, sed, fzf, mpv/vlc/iina"
+    echo "    Optional: aria2c (downloads), yt-dlp (video extraction)"
     echo ""
 }
 
 show_version() {
     echo -e "${CYAN}AniTerm${NC} v${VERSION}"
-    echo "CLI para ver anime con subtítulos en español"
+    echo "CLI to watch anime with Spanish subtitles"
 }
 
-# ========================
-# FLUJO PRINCIPAL
-# ========================
+# MAIN
 
 main() {
     setup_dirs
     
-    # Si no hay argumentos, mostrar ayuda
     if [[ $# -eq 0 ]]; then
         show_help
         exit 0
     fi
     
-    # Parsear argumentos
+    # parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -c|--continuar|--continue)
@@ -920,10 +844,9 @@ main() {
                 shift
                 ;;
             -*)
-                die "Opción desconocida: $1"
+                die "Unknown option: $1"
                 ;;
             *)
-                # Acumular términos de búsqueda
                 if [[ -z "$query" ]]; then
                     query="$1"
                 else
@@ -934,29 +857,24 @@ main() {
         esac
     done
     
-    # Verificar dependencias
     check_dependencies
     
-    # Modo continuar
     if [[ $continue_mode -eq 1 ]]; then
         continue_watching
         exit 0
     fi
     
-    # Verificar que hay una búsqueda
     if [[ -z "$query" ]]; then
-        # Modo interactivo - pedir búsqueda
-        printf "${CYAN}Buscar anime:${NC} "
+        printf "${CYAN}Search anime:${NC} "
         read -r query
         
         if [[ -z "$query" ]]; then
-            die "Debes especificar un anime para buscar"
+            die "You must specify an anime to search"
         fi
     fi
     
-    info "Buscando: $query (fuente: $source)"
+    info "Searching: $query (source: $source)"
     
-    # Buscar anime según la fuente
     local results
     case "$source" in
         monoschino)
@@ -971,8 +889,7 @@ main() {
     esac
     
     if [[ -z "$results" ]]; then
-        # Intentar con la otra fuente
-        warn "No se encontraron resultados en $source, probando fuente alternativa..."
+        warn "No results in $source, trying alternative source..."
         if [[ "$source" == "monoschino" ]]; then
             results=$(search_animeflv "$query")
             source="animeflv"
@@ -983,10 +900,9 @@ main() {
     fi
     
     if [[ -z "$results" ]]; then
-        die "No se encontraron resultados para '$query'"
+        die "No results found for '$query'"
     fi
     
-    # Seleccionar anime
     local selected_anime
     if [[ -n "$select_nth" ]]; then
         selected_anime=$(echo "$results" | sed -n "${select_nth}p" | cut -d'|' -f1)
@@ -995,16 +911,14 @@ main() {
     fi
     
     if [[ -z "$selected_anime" ]]; then
-        die "No se seleccionó ningún anime"
+        die "No anime selected"
     fi
     
-    # Obtener URL del anime seleccionado
     local anime_url
     anime_url=$(echo "$results" | grep "^${selected_anime}|" | cut -d'|' -f2)
     
-    info "Obteniendo episodios..."
+    info "Getting episodes..."
     
-    # Obtener lista de episodios según la fuente
     local episodes
     case "$source" in
         monoschino)
@@ -1019,33 +933,29 @@ main() {
     esac
     
     if [[ -z "$episodes" ]]; then
-        die "No se encontraron episodios para '$selected_anime'"
+        die "No episodes found for '$selected_anime'"
     fi
     
-    # Obtener el número máximo de episodios disponibles
     local max_episode
     max_episode=$(echo "$episodes" | grep -oE 'Episodio [0-9]+' | grep -oE '[0-9]+' | sort -n | tail -1)
     
-    # Seleccionar episodio(s)
     local selected_episode
     if [[ -n "$episode" ]]; then
-        # Verificar si es un rango (ej: 1-5 o 4-)
         if [[ "$episode" == *-* ]]; then
             local start_ep end_ep
             start_ep=$(echo "$episode" | cut -d'-' -f1)
             end_ep=$(echo "$episode" | cut -d'-' -f2)
             
-            # Si end_ep está vacío, usar el máximo disponible (rango abierto: 4-)
             if [[ -z "$end_ep" ]]; then
                 end_ep="$max_episode"
-                info "Rango abierto detectado: episodios $start_ep al $end_ep (último disponible)"
+                info "Open range detected: episodes $start_ep to $end_ep (last available)"
             fi
             
             local total_eps=$((end_ep - start_ep + 1))
             if [[ $download_mode -eq 1 ]]; then
-                info "Descargando $total_eps episodios ($start_ep al $end_ep)..."
+                info "Downloading $total_eps episodes ($start_ep to $end_ep)..."
             else
-                info "Reproduciendo episodios $start_ep al $end_ep..."
+                info "Playing episodes $start_ep to $end_ep..."
             fi
             
             local current=0
@@ -1054,7 +964,7 @@ main() {
                 selected_episode=$(echo "$episodes" | grep "Episodio ${ep}|" | head -1 | cut -d'|' -f1)
                 
                 if [[ -z "$selected_episode" ]]; then
-                    warn "Episodio $ep no encontrado, saltando..."
+                    warn "Episode $ep not found, skipping..."
                     continue
                 fi
                 
@@ -1071,27 +981,26 @@ main() {
                 
                 if [[ "$source" == "monoschino" ]]; then
                     if ! play_with_fallback "$episode_url" "$selected_anime" "$selected_episode"; then
-                        warn "Intentando fuente alternativa (AnimeFLV)..."
+                        warn "Trying alternative source (AnimeFLV)..."
                         local animeflv_ep_url="https://www3.animeflv.net/ver/${anime_slug}-${ep_num}"
-                        play_with_fallback_animeflv "$animeflv_ep_url" "$selected_anime" "$selected_episode" || warn "No se pudo procesar episodio $ep"
+                        play_with_fallback_animeflv "$animeflv_ep_url" "$selected_anime" "$selected_episode" || warn "Could not process episode $ep"
                     fi
                 else
                     if ! play_with_fallback_animeflv "$episode_url" "$selected_anime" "$selected_episode"; then
-                        warn "Intentando fuente alternativa (MonoSchino)..."
+                        warn "Trying alternative source (MonoSchino)..."
                         local monoschino_ep_url="https://monoschino2.com/ver/${anime_slug}-episodio-${ep_num}"
-                        play_with_fallback "$monoschino_ep_url" "$selected_anime" "$selected_episode" || warn "No se pudo procesar episodio $ep"
+                        play_with_fallback "$monoschino_ep_url" "$selected_anime" "$selected_episode" || warn "Could not process episode $ep"
                     fi
                 fi
             done
             
             if [[ $download_mode -eq 1 ]]; then
                 echo ""
-                success "¡Descarga de $total_eps episodios completada!"
-                info "Ubicación: $DOWNLOAD_DIR/$selected_anime/"
+                success "Download of $total_eps episodes complete!"
+                info "Location: $DOWNLOAD_DIR/$selected_anime/"
             fi
             return 0
         else
-            # Episodio específico
             selected_episode=$(echo "$episodes" | grep "Episodio ${episode}|" | head -1 | cut -d'|' -f1)
         fi
     else
@@ -1099,47 +1008,41 @@ main() {
     fi
     
     if [[ -z "$selected_episode" ]]; then
-        die "No se seleccionó ningún episodio"
+        die "No episode selected"
     fi
     
-    # Obtener URL del episodio
     local episode_url
     episode_url=$(echo "$episodes" | grep "^${selected_episode}|" | cut -d'|' -f2)
     
-    # Extraer número de episodio y slug del anime para fallback
     local ep_num
     ep_num=$(echo "$selected_episode" | sed 's/Episodio //')
     local anime_slug
     anime_slug=$(echo "$anime_url" | sed 's|https://monoschino2.com/||; s|https://www3.animeflv.net/anime/||')
     
-    info "Obteniendo enlace del video..."
+    info "Getting video link..."
     
-    # Para MonoSchino, usar sistema de fallback con múltiples servidores
     if [[ "$source" == "monoschino" ]]; then
         if ! play_with_fallback "$episode_url" "$selected_anime" "$selected_episode"; then
-            # Si MonoSchino falló completamente, intentar AnimeFLV
-            warn "Intentando fuente alternativa (AnimeFLV)..."
+            warn "Trying alternative source (AnimeFLV)..."
             local animeflv_ep_url="https://www3.animeflv.net/ver/${anime_slug}-${ep_num}"
             
             if ! play_with_fallback_animeflv "$animeflv_ep_url" "$selected_anime" "$selected_episode"; then
-                die "No se pudo reproducir el video con ninguna fuente disponible"
+                die "Could not play video with any available source"
             fi
         fi
     else
-        # AnimeFLV: usar sistema de fallback entre servidores
         if ! play_with_fallback_animeflv "$episode_url" "$selected_anime" "$selected_episode"; then
-            # Si AnimeFLV falló, intentar MonoSchino
-            warn "Intentando fuente alternativa (MonoSchino)..."
+            warn "Trying alternative source (MonoSchino)..."
             local monoschino_ep_url="https://monoschino2.com/ver/${anime_slug}-episodio-${ep_num}"
             
             if ! play_with_fallback "$monoschino_ep_url" "$selected_anime" "$selected_episode"; then
-                die "No se pudo reproducir el video con ninguna fuente disponible"
+                die "Could not play video with any available source"
             fi
         fi
     fi
 }
 
-# Reproducir con fallback automático entre servidores
+# play with automatic server fallback
 play_with_fallback() {
     local episode_url="$1"
     local anime_name="$2"
@@ -1151,33 +1054,25 @@ play_with_fallback() {
     all_urls=$(get_all_video_urls_monoschino "$episode_url")
     
     if [[ -z "$all_urls" ]]; then
-        die "No se encontraron servidores de video disponibles"
+        die "No video servers available"
     fi
     
-    # Intentar cada servidor en orden de prioridad
     local success=0
     while IFS='|' read -r server url; do
         [[ -z "$url" ]] && continue
         
-        info "Intentando servidor: $server"
+        info "Trying server: $server"
         
-        # Intentar extraer URL directa
         local direct_url
         direct_url=$(yt-dlp -g --no-check-certificates "$url" 2>/dev/null | head -1)
         
-        # Verificar que la extracción fue exitosa:
-        # 1. La URL no está vacía
-        # 2. La URL es diferente a la original (no devolvió lo mismo)
-        # 3. La URL parece ser un video directo (contiene .mp4, video, o es de CDN)
         if [[ -n "$direct_url" && "$direct_url" != "$url" ]]; then
-            # Verificar que el enlace es accesible (HEAD request)
             local http_status
             http_status=$(curl -sI -o /dev/null -w "%{http_code}" "$direct_url" -H "Referer: https://www.${server}.com/" -k --max-time 5 2>/dev/null)
             
             if [[ "$http_status" == "200" || "$http_status" == "206" ]]; then
-                info "Enlace extraído correctamente de $server"
+                info "Link extracted from $server"
                 
-                # Determinar referer
                 local referer=""
                 case "$server" in
                     mp4upload) referer="https://www.mp4upload.com/" ;;
@@ -1186,10 +1081,8 @@ play_with_fallback() {
                     uqload) referer="https://uqload.ws/" ;;
                 esac
                 
-                # Guardar URL original para el historial
                 echo "$(date '+%Y-%m-%d %H:%M')|$title|$url" >> "$HISTORY_FILE"
                 
-                # Modo descarga
                 if [[ $download_mode -eq 1 ]]; then
                     download_video "$direct_url" "$anime_name" "$episode_name" "$referer"
                     return 0
@@ -1232,83 +1125,72 @@ play_with_fallback() {
                 "$PLAYER" "${player_args[@]}" "$direct_url"
                 return 0
             else
-                warn "Servidor $server no accesible (HTTP $http_status), probando siguiente..."
+                warn "Server $server not accessible (HTTP $http_status), trying next..."
             fi
         else
-            warn "Falló extracción de $server, probando siguiente..."
+            warn "Extraction failed for $server, trying next..."
         fi
     done <<< "$all_urls"
     
-    # Retornar error en lugar de die para permitir fallback
-    error "No se pudo reproducir con ningún servidor de MonoSchino"
+    error "Could not play with any MonoSchino server"
     return 1
 }
 
-# Reproducir con fallback automático - AnimeFLV
+# play with automatic server fallback - AnimeFLV
 play_with_fallback_animeflv() {
     local episode_url="$1"
     local anime_name="$2"
     local episode_name="$3"
     local title="${anime_name} - ${episode_name}"
     
-    # Obtener todas las URLs disponibles
     local all_urls
     all_urls=$(get_all_video_urls_animeflv "$episode_url")
     
     if [[ -z "$all_urls" ]]; then
-        error "No se encontraron servidores de video disponibles en AnimeFLV"
+        error "No video servers available in AnimeFLV"
         return 1
     fi
     
-    info "Servidores encontrados: $(echo "$all_urls" | wc -l | tr -d ' ')"
+    info "Servers found: $(echo "$all_urls" | wc -l | tr -d ' ')"
     
-    # Intentar cada servidor en orden de prioridad
     while IFS='|' read -r server url; do
         [[ -z "$url" ]] && continue
         
-        info "Intentando servidor: $server ($url)"
+        info "Trying server: $server ($url)"
         
-        # Mega funciona directamente con mpv sin yt-dlp
         if [[ "$server" == "mega" ]]; then
-            warn "Mega requiere megacmd o acceso web directo, saltando..."
+            warn "Mega requires megacmd or direct web access, skipping..."
             continue
         fi
         
-        # Intentar extraer URL directa con yt-dlp
         local direct_url
         direct_url=$(yt-dlp -g --no-check-certificates "$url" 2>/dev/null | head -1)
         
         if [[ -n "$direct_url" && "$direct_url" != "$url" ]]; then
-            # Verificar que el enlace es accesible
             local http_status
             http_status=$(curl -sI -o /dev/null -w "%{http_code}" "$direct_url" -k --max-time 5 2>/dev/null)
             
             if [[ "$http_status" == "200" || "$http_status" == "206" || "$http_status" == "302" || "$http_status" == "301" ]]; then
-                info "Enlace extraído correctamente de $server"
+                info "Link extracted from $server"
                 
-                # Guardar URL original para el historial
                 echo "$(date '+%Y-%m-%d %H:%M')|$title|$url" >> "$HISTORY_FILE"
                 
-                # Determinar referer
                 local referer=""
                 case "$server" in
                     mailru) referer="https://my.mail.ru/" ;;
                     okru) referer="https://ok.ru/" ;;
                 esac
                 
-                # Modo descarga
                 if [[ $download_mode -eq 1 ]]; then
                     download_video "$direct_url" "$anime_name" "$episode_name" "$referer"
                     return 0
                 fi
                 
-                # Modo prebuffer
                 if [[ $prebuffer_mode -eq 1 ]]; then
                     prebuffer_and_play "$direct_url" "$title" "$referer"
                     return 0
                 fi
                 
-                # Reproducir
                 local player_args=()
                 case "$PLAYER" in
                     mpv)
@@ -1338,16 +1220,15 @@ play_with_fallback_animeflv() {
                 "$PLAYER" "${player_args[@]}" "$direct_url"
                 return 0
             else
-                warn "Servidor $server no accesible (HTTP $http_status), probando siguiente..."
+                warn "Server $server not accessible (HTTP $http_status), trying next..."
             fi
         else
-            warn "yt-dlp no soporta $server, probando siguiente..."
+            warn "yt-dlp doesn't support $server, trying next..."
         fi
     done <<< "$all_urls"
     
-    error "No se pudo reproducir con ningún servidor de AnimeFLV"
+    error "Could not play with any AnimeFLV server"
     return 1
 }
 
-# Ejecutar
 main "$@"
