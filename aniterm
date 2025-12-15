@@ -31,8 +31,6 @@ DOWNLOAD_DIR="${ANITERM_DOWNLOAD_DIR:-$HOME/Downloads/AniTerm}"
 QUALITY="${ANITERM_QUALITY:-1080}"
 HISTORY_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/aniterm/historial"
 LOG_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/aniterm/log"
-
-# state variables
 query=""
 episode=""
 download_mode=0
